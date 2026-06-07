@@ -1,0 +1,42 @@
+#!/bin/zsh
+# ~/.local/bin/tmux-autoname
+# Called by tmux after-new-session hook.
+# Renames a numbered session (0, 1, 2...) to its detected project slug.
+# Args: $1=session_name $2=session_path
+
+SESS="$1"; PATH_="$2"
+[[ -z "$SESS" || -z "$PATH_" ]] && exit 0
+# Only rename pure numeric session names
+[[ "$SESS" =~ ^[0-9]+$ ]] || exit 0
+
+# Strip Claude/Codex worktree suffix to get project root
+PROJ_ROOT="${PATH_%%/.claude/worktrees/*}"
+[[ "$PROJ_ROOT" == "$PATH_" ]] && PROJ_ROOT="${PATH_%%/.codex/worktrees/*}"
+[[ -z "$PROJ_ROOT" || ! -d "$PROJ_ROOT" ]] && exit 0
+
+# Project name detection (priority: git remote > git toplevel > dirname)
+NAME=""
+GTOP=$(git -C "$PROJ_ROOT" rev-parse --show-toplevel 2>/dev/null)
+if [[ -n "$GTOP" ]]; then
+  REMOTE=$(git -C "$GTOP" remote get-url origin 2>/dev/null)
+  if [[ -n "$REMOTE" ]]; then
+    NAME="${REMOTE##*/}"; NAME="${NAME%.git}"; NAME="${NAME%.GIT}"
+  fi
+  [[ -z "$NAME" ]] && NAME=$(basename "$GTOP")
+fi
+[[ -z "$NAME" ]] && NAME=$(basename "$PROJ_ROOT")
+[[ -z "$NAME" ]] && exit 0
+
+# Slug: ASCII only, spaces/special → hyphens
+SLUG=$(printf '%s' "$NAME" | LC_ALL=C tr -cs 'A-Za-z0-9_-' '-' | sed 's/--*/-/g;s/^-//;s/-$//')
+SLUG="${SLUG:0:20}"
+[[ -z "$SLUG" ]] && exit 0
+
+# Collision-safe rename
+ATTEMPT="$SLUG"; I=2
+while tmux has-session -t "$ATTEMPT" 2>/dev/null && [[ "$ATTEMPT" != "$SESS" ]]; do
+  ATTEMPT="${SLUG}-${I}"; (( I++ ))
+  [[ $I -gt 9 ]] && exit 1
+done
+[[ "$ATTEMPT" != "$SESS" ]] && tmux rename-session -t "$SESS" "$ATTEMPT" 2>/dev/null
+exit 0
