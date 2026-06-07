@@ -1,0 +1,92 @@
+#!/bin/zsh
+# ta-cx: ctrl-x handler for ta() — open Claude Code in the selected session
+# Usage: ta-cx SESSION_NAME
+SESS="$1"
+[[ -z "$SESS" ]] && exit 1
+
+PINFO=$(tmux list-panes -a \
+  -F '#{session_name}|#{window_active}|#{pane_active}|#{pane_current_path}|#{pane_current_command}' \
+  2>/dev/null | awk -F'|' -v s="$SESS" '$1==s && $2=="1" && $3=="1" {print $4"|"$5; exit}')
+CWD="${PINFO%%|*}"; CMD="${PINFO##*|}"
+[[ -z "$CWD" ]] && CWD="$HOME"
+
+# Strip worktree suffix to get project root
+PROJ="${CWD%%/.claude/worktrees/*}"
+[[ "$PROJ" == "$CWD" ]] && PROJ="$CWD"
+
+# Detect Codex — matches command name and worktree path pattern
+IS_CODEX=0
+[[ "$CMD" == "codex" || "$CMD" == "Codex" || "$CWD" == *".codex/worktrees"* ]] && IS_CODEX=1
+
+# Guard: check if Claude is already open in a pane of this session at the target CWD
+_existing_claude_pane=$(tmux list-panes -t "$SESS" \
+  -F '#{pane_id}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null \
+  | awk -F'|' '$2 ~ /^[0-9]+\.[0-9]+\.[0-9]+/ && $3==cwd {print $1; exit}' cwd="$CWD")
+
+if [[ -n "$_existing_claude_pane" ]]; then
+  # Claude already running in a pane — switch to it instead of opening a duplicate
+  tmux select-pane -t "$_existing_claude_pane" 2>/dev/null
+  if [[ -n "$TMUX" ]]; then exec tmux switch-client -t "$SESS"
+  else exec tmux attach -t "$SESS"; fi
+  exit 0
+fi
+
+if [[ "$IS_CODEX" == "1" ]]; then
+  # CWD-scoped Codex thread lookup via SQLite — avoids --last which is global
+  CODEX_THREAD_ID=$(python3 - "$CWD" 2>/dev/null <<'PYEOF'
+import sqlite3, sys, os
+cwd = sys.argv[1]
+db = os.path.expanduser('~/.codex/state_5.sqlite')
+if not os.path.exists(db):
+    sys.exit(0)
+try:
+    conn = sqlite3.connect(db)
+    c = conn.cursor()
+    c.execute(
+        'SELECT id FROM threads WHERE cwd=? AND archived=0 ORDER BY updated_at DESC LIMIT 1',
+        (cwd,)
+    )
+    row = c.fetchone()
+    if row:
+        print(row[0])
+    conn.close()
+except: pass
+PYEOF
+  )
+  if [[ -n "$CODEX_THREAD_ID" ]]; then
+    tmux new-window -t "$SESS" -n "codex" -c "$CWD" "zsh -i -c 'codex resume $CODEX_THREAD_ID'"
+  else
+    # No matching thread for this CWD — start fresh rather than resuming wrong project
+    tmux new-window -t "$SESS" -n "codex" -c "$CWD" "zsh -i -c 'codex'"
+  fi
+elif [[ "$CWD" == *"/.claude/worktrees/"* || "$CMD" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+  # Claude worktree — try targeted session resume, else continue
+  SESS_ID=$(python3 - "$CWD" "$PROJ" 2>/dev/null <<'PYEOF'
+import json, os, glob, sys, subprocess
+path, proj = sys.argv[1], sys.argv[2]
+sd = os.path.expanduser('~/.claude/sessions/')
+best = None
+for f in glob.glob(sd + '*.json'):
+    try:
+        d = json.load(open(f))
+        if d.get('cwd') in (path, proj) and isinstance(d.get('pid'), int):
+            try: subprocess.check_call(['kill', '-0', str(d['pid'])], stderr=subprocess.DEVNULL)
+            except: continue
+            if best is None or d.get('updatedAt', 0) > best.get('updatedAt', 0):
+                best = d
+    except: pass
+if best:
+    print(best.get('sessionId', ''))
+PYEOF
+  )
+  if [[ -n "$SESS_ID" ]]; then
+    tmux new-window -t "$SESS" -n "claude" -c "$CWD" "zsh -i -c 'claude -r $SESS_ID'"
+  else
+    tmux new-window -t "$SESS" -n "claude" -c "$CWD" "zsh -i -c 'claude -c'"
+  fi
+else
+  tmux new-window -t "$SESS" -n "claude" -c "$PROJ" "zsh -i -c 'claude'"
+fi
+
+if [[ -n "$TMUX" ]]; then exec tmux switch-client -t "$SESS"
+else exec tmux attach -t "$SESS"; fi

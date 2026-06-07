@@ -1,0 +1,223 @@
+#!/bin/zsh
+# ta-preview: fzf preview for ta() — called with session name as $1
+S="$1"
+[[ -z "$S" ]] && exit 0
+
+DIM=$'\033[90m'; B=$'\033[1m'; YL=$'\033[33m'
+GR=$'\033[32m'; RD=$'\033[31m'; CY=$'\033[36m'
+MG=$'\033[35m'; BL=$'\033[34m'; R=$'\033[0m'
+
+# ── Find active pane ──
+PINFO=$(tmux list-panes -a \
+  -F '#{session_name}|#{window_active}|#{pane_active}|#{pane_id}|#{pane_current_path}|#{pane_current_command}' \
+  2>/dev/null | awk -F'|' -v s="$S" '$1==s && $2=="1" && $3=="1" {print $4"|"$5"|"$6; exit}')
+PANE_ID="${PINFO%%|*}"; rest="${PINFO#*|}"; P="${rest%%|*}"; CMD="${rest##*|}"
+PP="${P%%/.claude/worktrees/*}"; [[ "$PP" == "$P" ]] && PP="$P"
+WT=""; [[ "$P" == *"/.claude/worktrees/"* ]] && WT="${P##*/.claude/worktrees/}" && WT="${WT%%/*}"
+
+IS_CLAUDE=0
+[[ "$P" == *".claude/worktrees"* || "$CMD" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] && IS_CLAUDE=1
+
+IS_CODEX=0
+[[ "$CMD" == "codex" || "$CMD" == "Codex" || "$P" == *".codex/worktrees"* ]] && IS_CODEX=1
+
+# ── Claude status ──
+if [[ "$IS_CLAUDE" == "1" ]]; then
+  printf "${B}── Claude${R}${DIM} ─────────────────────────${R}\n"
+  python3 - "$P" "$PP" 2>/dev/null <<'PYEOF'
+import json, os, glob, sys, subprocess, datetime
+path, proj = sys.argv[1], sys.argv[2]
+sd = os.path.expanduser('~/.claude/sessions/')
+best = None
+for f in glob.glob(sd + '*.json'):
+    try:
+        d = json.load(open(f))
+        if d.get('cwd') in (path, proj) and isinstance(d.get('pid'), int):
+            try: subprocess.check_call(['kill', '-0', str(d['pid'])], stderr=subprocess.DEVNULL)
+            except: continue
+            if best is None or d.get('updatedAt', 0) > best.get('updatedAt', 0):
+                best = d
+    except: pass
+if best:
+    st = best.get('status', '?')
+    ic = {'busy': '\033[1;31m⏳ BUSY\033[0m',
+          'waiting': '\033[1;33m⏸  WAIT\033[0m',
+          'idle': '\033[32m✓  IDLE\033[0m'}.get(st, st)
+    ts = best.get('updatedAt', 0) / 1000
+    t = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S') if ts else '?'
+    print(f'  {ic}  v{best.get("version","?")}  {t}')
+    sid = best.get('sessionId', '')
+    if sid:
+        print(f'  {sid[:8]}  pid:{best.get("pid","?")}')
+        # O(1) JSONL lookup: files are named <sessionId>.jsonl under project dirs
+        # Look for last-prompt type (actual field in Claude Code JSONL; ai-title does not exist)
+        pd = os.path.expanduser('~/.claude/projects/')
+        found_file = None
+        try:
+            for proj_dir in os.listdir(pd):
+                candidate = os.path.join(pd, proj_dir, sid + '.jsonl')
+                if os.path.exists(candidate):
+                    found_file = candidate
+                    break
+        except OSError:
+            pass
+        if found_file:
+            try:
+                last_prompt = None
+                for line in open(found_file, errors='ignore'):
+                    try:
+                        obj = json.loads(line)
+                        if obj.get('type') == 'last-prompt' and obj.get('lastPrompt'):
+                            last_prompt = obj['lastPrompt']
+                    except: pass
+                if last_prompt:
+                    preview = last_prompt.strip().replace('\n', ' ')[:70]
+                    print(f'  \033[90m{preview}\033[0m')
+            except: pass
+else:
+    print('  \033[90m(no active session found)\033[0m')
+PYEOF
+  printf "\n"
+fi
+
+# ── Codex status ──
+if [[ "$IS_CODEX" == "1" ]]; then
+  printf "${B}── Codex${R}${DIM} ─────────────────────────${R}\n"
+  python3 - "$P" 2>/dev/null <<'PYEOF'
+import sqlite3, sys, datetime, os
+path = sys.argv[1]
+db = os.path.expanduser('~/.codex/state_5.sqlite')
+if not os.path.exists(db):
+    print('  \033[90m(no codex db)\033[0m')
+    sys.exit(0)
+conn = sqlite3.connect(db)
+c = conn.cursor()
+c.execute('SELECT title, updated_at, git_branch, model FROM threads WHERE cwd=? AND archived=0 ORDER BY updated_at DESC LIMIT 1', (path,))
+row = c.fetchone()
+if row:
+    t = datetime.datetime.fromtimestamp(row[1]).strftime('%H:%M')
+    print(f'  \033[32m{(row[0] or "")[:50]}\033[0m')
+    print(f'  {row[2] or "?"} | {row[3]} | {t}')
+else:
+    print('  \033[90m(no recent session)\033[0m')
+conn.close()
+PYEOF
+  printf "\n"
+fi
+
+# ── Pane snapshot ──
+if [[ -n "$PANE_ID" ]]; then
+  printf "${B}── Pane${R}${DIM} ──────────────────────────${R}\n"
+  # Filter blank/ANSI-only lines then take last 15 lines for better Claude tool-call visibility
+  tmux capture-pane -t "$PANE_ID" -p 2>/dev/null \
+    | grep -v '^[[:space:]]*$' \
+    | tail -15 \
+    | sed "s/^/  /"
+  printf "\n"
+fi
+
+# ── Windows ──
+printf "${B}── Windows${R}${DIM} ───────────────────────${R}\n"
+tmux list-windows -t "$S" \
+  -F "  #{window_index} #{?window_active,▶ ,  }#{window_name}  ${DIM}#{window_panes}p${R}" \
+  2>/dev/null
+
+# ── Path ──
+printf "\n${B}── Path${R}${DIM} ──────────────────────────${R}\n"
+if [[ -n "$WT" ]]; then
+  printf "  ${DIM}wt: %s${R}\n  ${DIM}%s${R}\n" "$WT" "$PP"
+else
+  printf "  ${DIM}%s${R}\n" "$P"
+fi
+
+# ── Worktree siblings — one git worktree list call instead of N branch calls ──
+if [[ -n "$WT" && -d "$PP/.claude/worktrees" ]]; then
+  printf "\n${B}── Worktrees${R}${DIM} ─────────────────────${R}\n"
+  # Build branch map via single git worktree list --porcelain from project root
+  declare -A _wt_branches
+  _cur_wt=""
+  while IFS= read -r _wl_line; do
+    case "$_wl_line" in
+      worktree\ *) _cur_wt="${_wl_line#worktree }" ;;
+      branch\ *)   _wt_branches["$_cur_wt"]="${_wl_line#branch refs/heads/}" ;;
+    esac
+  done < <(git -C "$PP" --no-optional-locks worktree list --porcelain 2>/dev/null)
+
+  for _w in "$PP/.claude/worktrees"/*/; do
+    _wn=$(basename "$_w")
+    _br="${_wt_branches[$_w%/]:-${_wt_branches[${_w%/}]:-}}"
+    # Fallback: strip trailing slash variants
+    [[ -z "$_br" ]] && _br="${_wt_branches[${_w}]:-}"
+    if [[ "$_wn" == "$WT" ]]; then
+      printf "  ${BL}▶ %s${R}  ${CY}%s${R}\n" "$_wn" "$_br"
+    else
+      printf "  ${DIM}  %s${R}  %s\n" "$_wn" "$_br"
+    fi
+  done
+fi
+
+# ── Git — combine rev-parse + branch into one call, add --no-optional-locks ──
+GG=""
+BR=""
+_git_info=$(git -C "$P" --no-optional-locks rev-parse --show-toplevel --abbrev-ref HEAD 2>/dev/null)
+if [[ -n "$_git_info" ]]; then
+  GG=$(printf '%s\n' "$_git_info" | head -1)
+  BR=$(printf '%s\n' "$_git_info" | tail -1)
+else
+  _git_info=$(git -C "$PP" --no-optional-locks rev-parse --show-toplevel --abbrev-ref HEAD 2>/dev/null)
+  if [[ -n "$_git_info" ]]; then
+    GG=$(printf '%s\n' "$_git_info" | head -1)
+    BR=$(printf '%s\n' "$_git_info" | tail -1)
+  fi
+fi
+[[ "$GG" == "$BR" ]] && BR=""  # rev-parse returns same line twice only on bare repos
+
+if [[ -n "$GG" ]]; then
+  printf "\n${B}── Git${R}${DIM} ────────────────────────────${R}\n"
+  printf "  ${CY}%s${R}\n" "$BR"
+  GS=$(git -C "$GG" --no-optional-locks status -s 2>/dev/null | head -5)
+  if [[ -n "$GS" ]]; then
+    printf '%s\n' "$GS" | while IFS= read -r line; do
+      case "$line" in
+        M*|" M"*) printf "  ${YL}%s${R}\n" "$line" ;;
+        A*|" A"*) printf "  ${GR}%s${R}\n" "$line" ;;
+        D*|" D"*) printf "  ${RD}%s${R}\n" "$line" ;;
+        "??"*)    printf "  ${DIM}%s${R}\n" "$line" ;;
+        *)        printf "  %s\n" "$line" ;;
+      esac
+    done
+  else
+    printf "  ${DIM}(clean)${R}\n"
+  fi
+  printf "\n${B}── Commits${R}${DIM} ──────────────────────${R}\n"
+  git -C "$GG" --no-optional-locks log --oneline --color=always -5 2>/dev/null | sed "s/^/  /"
+fi
+
+# ── MCP servers — check .mcp.json, settings.json, and global settings ──
+# Use heredoc + sys.argv to avoid shell variable interpolation into Python string literals
+# (fixes crash when path contains single quotes)
+MCP_PATHS=("$PP/.mcp.json" "$PP/.claude/settings.json" "$PP/.claude/settings.local.json" "$HOME/.claude/settings.json" "$HOME/.claude/.mcp.json")
+_mcp_shown=0
+for mcp_path in "${MCP_PATHS[@]}"; do
+  [[ -f "$mcp_path" ]] || continue
+  if [[ "$_mcp_shown" == "0" ]]; then
+    printf "\n${B}── MCP${R}${DIM} ─────────────────────────────${R}\n"
+    _mcp_shown=1
+  fi
+  python3 - "$mcp_path" 2>/dev/null <<'PYEOF'
+import json, sys, os
+path = sys.argv[1]
+home = os.path.expanduser('~')
+label = '[global]' if path.startswith(os.path.join(home, '.claude')) else '[project]'
+try:
+    d = json.load(open(path))
+    servers = d.get('mcpServers', {})
+    if not servers:
+        sys.exit(0)
+    for name, cfg in servers.items():
+        kind = 'http' if 'url' in cfg else 'cmd'
+        target = (cfg.get('url') or cfg.get('command', '?'))[:35]
+        print(f'  {name} [{kind}] {label}: {target}')
+except: pass
+PYEOF
+done

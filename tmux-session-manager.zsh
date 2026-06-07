@@ -58,12 +58,34 @@ _ta_build_list() {
     -F '#{session_name}|#{window_active}|#{pane_active}|#{pane_current_command}|#{pane_current_path}' \
     2>/dev/null)
 
+  # Batch Claude session status — ONE python3 call for all sessions (cwd|status map)
+  local _claude_status_map
+  _claude_status_map=$(python3 - 2>/dev/null <<'PYEOF_BATCH'
+import json, os, glob, subprocess
+sd = os.path.expanduser('~/.claude/sessions/')
+by_cwd = {}
+for f in glob.glob(sd + '*.json'):
+    try:
+        d = json.load(open(f))
+        cwd = d.get('cwd'); pid = d.get('pid')
+        if not cwd or not isinstance(pid, int): continue
+        try: subprocess.check_call(['kill', '-0', str(pid)], stderr=subprocess.DEVNULL)
+        except: continue
+        prev = by_cwd.get(cwd)
+        if prev is None or d.get('updatedAt', 0) > prev.get('updatedAt', 0):
+            by_cwd[cwd] = d
+    except: pass
+for cwd, d in by_cwd.items():
+    print(f"{cwd}|{d.get('status', '')}")
+PYEOF_BATCH
+  )
+
   while IFS='|' read -r _sess _att _wins _ts; do
     local _p="${_ppath[$_sess]:-$HOME}" _c="${_pcmd[$_sess]:-zsh}"
 
     # tool detection
     local _tkey _icon _tcol
-    if [[ "$_p" == *".claude/worktrees"* || "$_c" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$_p" == *".claude/worktrees"* || "$_c" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       _tkey=claude; _icon=""; _tcol="${B}${BL}"
     elif [[ "$_c" == "codex" || "$_c" == "Codex" || "$_p" == *"/.codex/worktrees"* ]]; then
       _tkey=codex;  _icon="";  _tcol="${B}${MG}"
@@ -89,14 +111,14 @@ _ta_build_list() {
     if [[ -n "$_wt" ]]; then
       _gtop=$(git -C "$_proj_path" rev-parse --show-toplevel 2>/dev/null)
       if [[ -n "$_gtop" ]]; then
-        _proj=$(basename "$_gtop"); _br=$(git -C "$_p" branch --show-current 2>/dev/null)
+        _proj=$(basename "$_gtop"); _br=$(git -C "$_p" --no-optional-locks branch --show-current 2>/dev/null)
       else
         _proj=$(basename "$_proj_path"); _br=""
       fi
     else
       _gtop=$(git -C "$_p" rev-parse --show-toplevel 2>/dev/null)
       if [[ -n "$_gtop" ]]; then
-        _proj=$(basename "$_gtop"); _br=$(git -C "$_p" branch --show-current 2>/dev/null)
+        _proj=$(basename "$_gtop"); _br=$(git -C "$_p" --no-optional-locks branch --show-current 2>/dev/null)
       else
         _proj=$(basename "$_p"); _br=""
       fi
@@ -111,24 +133,12 @@ _ta_build_list() {
     else                           _ago="$(( _diff / 86400 ))d"
     fi
 
-    # Claude live status shown inline (non-blocking python3 call)
+    # Claude live status — O(1) lookup from pre-built map (no subprocess per session)
     local _st_icon=""
     if [[ "$_tkey" == "claude" ]]; then
-      local _st; _st=$(python3 - "$_p" "$_proj_path" 2>/dev/null <<'PYEOF2'
-import json,os,glob,sys,subprocess
-path,base=sys.argv[1],sys.argv[2]
-sd=os.path.expanduser('~/.claude/sessions/'); best=None
-for f in glob.glob(sd+'*.json'):
-    try:
-        d=json.load(open(f))
-        if d.get('cwd') in (path,base) and isinstance(d.get('pid'),int):
-            try: subprocess.check_call(['kill','-0',str(d['pid'])],stderr=subprocess.DEVNULL)
-            except: continue
-            if best is None or d.get('updatedAt',0)>best.get('updatedAt',0): best=d
-    except: pass
-if best: print(best.get('status',''))
-PYEOF2
-      )
+      local _st
+      _st=$(printf '%s\n' "$_claude_status_map" \
+        | awk -F'|' -v p="$_p" -v pp="$_proj_path" '$1==p || $1==pp {print $2; exit}')
       case "$_st" in
         busy)    _st_icon=" ${RD}⏳${R}" ;;
         waiting) _st_icon=" ${YL}⏸${R}" ;;
@@ -163,9 +173,7 @@ PYEOF2
     [[ -n "$_st_icon" ]] && _line+="${_st_icon}"
     _line+="  ${DIM}${_ago}${R}"
 
-    local _slug; _slug=$(_ta_slug "$_proj")
-    [[ -n "$_wt" ]] && _slug="${_slug:0:12}-${_wt:0:8}" || _slug="${_slug:0:20}"
-    printf '%s|%s|%s\n' "$_sess" "$_slug" "$_line"
+    printf '%s|%s\n' "$_sess" "$_line"
   done < <(tmux list-sessions \
     -F '#{session_name}|#{session_attached}|#{session_windows}|#{session_activity}' 2>/dev/null)
 }
@@ -214,46 +222,19 @@ ta() {
   # build initial list
   local _list; _list=$(_ta_build_list)
 
-  # reload script — sources this file and calls _ta_build_list (single source of truth)
+  # reload script — sources ~/.zshrc (hardcoded; ${(%):-%x} resolves to 'zsh' inside a function)
   local _reload_f="/tmp/ta_reload_$$.sh"
-  printf '#!/bin/zsh\nsource "%s" 2>/dev/null\n_ta_build_list\n' "${(%):-%x}" > "$_reload_f"
+  printf '#!/bin/zsh\nsource "%s" 2>/dev/null\n_ta_build_list\n' "$HOME/.zshrc" > "$_reload_f"
   chmod +x "$_reload_f"
-
-  local _cn_f="/tmp/ta_cn_$$.sh"
-  cat > "$_cn_f" << 'CNEOF'
-#!/bin/zsh
-printf 'New session name: ' >/dev/tty
-read -r _n </dev/tty
-[[ -z "$_n" ]] && exit 0
-if tmux has-session -t "$_n" 2>/dev/null; then
-  printf "Session '%s' already exists\n" "$_n" >/dev/tty; sleep 1
-else
-  tmux new-session -d -s "$_n" -c "$HOME" 2>/dev/null && printf "Created '%s'\n" "$_n" >/dev/tty
-fi
-CNEOF
-  chmod +x "$_cn_f"
-
-  local _cr_f="/tmp/ta_cr_$$.sh"
-  cat > "$_cr_f" << 'CREOF'
-#!/bin/zsh
-SESS="$1"; HINT="$2"
-printf "Rename '%s' → [%s]: " "$SESS" "$HINT" >/dev/tty
-read -r _new </dev/tty
-[[ -z "$_new" ]] && _new="$HINT"
-[[ -z "$_new" || "$_new" == "$SESS" ]] && exit 0
-if tmux has-session -t "$_new" 2>/dev/null; then
-  printf "Name '%s' already exists\n" "$_new" >/dev/tty; sleep 1
-else
-  tmux rename-session -t "$SESS" "$_new" 2>/dev/null
-fi
-CREOF
-  chmod +x "$_cr_f"
-
-  trap "rm -f '$_reload_f' '$_cn_f' '$_cr_f'" EXIT INT TERM
+  trap "rm -f '$_reload_f'" EXIT INT TERM
 
   # adaptive preview window: hidden by default on narrow screens
   local _pw="right:44%,hidden,border-left"
   (( ${COLUMNS:-80} >= 120 )) && _pw="right:44%,border-left"
+
+  # Current tmux session name (to guard ctrl-d from killing the active session)
+  local _cur_sess=""
+  [[ -n "$TMUX" ]] && _cur_sess=$(tmux display-message -p '#S' 2>/dev/null)
 
   local _out _key _sel
   _out=$(printf '%s\n' "$_list" \
@@ -261,7 +242,7 @@ CREOF
         --ansi \
         --prompt=" tmux  " \
         --delimiter='|' \
-        --with-nth=3 \
+        --with-nth=2 \
         --height=80% \
         --min-height=6 \
         --reverse \
@@ -271,23 +252,70 @@ CREOF
         --info=right \
         --pointer='▶' \
         --marker='✓' \
+        --track \
         --color='border:#555555,label:#aaaaaa,pointer:#61afef,hl:#e5c07b,hl+:#e5c07b' \
         --header=$'  enter:attach  ctrl-x:resume-ai  ctrl-d:delete↺  ctrl-n:new  ctrl-r:rename  ?:preview\n' \
-        --bind "ctrl-d:execute-silent(tmux kill-session -t {1} 2>/dev/null)+reload(zsh '$_reload_f')" \
-        --bind "ctrl-n:execute(zsh '$_cn_f')+reload(zsh '$_reload_f')" \
-        --bind "ctrl-r:execute(zsh '$_cr_f' {1} {2})+reload(zsh '$_reload_f')" \
+        --bind "ctrl-d:execute([[ {1} == '${_cur_sess}' ]] && { printf 'Cannot delete current session.\n'; read -r; exit 0; }; printf 'Kill %s? [y/N] ' {1}; read -r _a; [[ \$_a =~ ^[Yy]\$ ]] && tmux kill-session -t {1} 2>/dev/null)+reload(zsh '$_reload_f')" \
         --bind "ctrl-x:become($HOME/.local/bin/ta-cx {1})" \
         --bind "?:toggle-preview" \
         --preview="$HOME/.local/bin/ta-preview {1}" \
-        --preview-window="$_pw")
+        --preview-window="$_pw" \
+        --expect='ctrl-n,ctrl-r')
 
-  _sel=$(printf '%s' "$_out" | cut -d'|' -f1)
+  _key=$(printf '%s' "$_out" | head -1)
+  _sel=$(printf '%s' "$_out" | sed -n '2p' | cut -d'|' -f1)
 
-  rm -f "$_reload_f" "$_cn_f" "$_cr_f" 2>/dev/null
+  rm -f "$_reload_f" 2>/dev/null
   trap - EXIT INT TERM
 
-  [[ -z "$_sel" ]] && return
-  [[ -n "$TMUX" ]] && tmux switch-client -t "$_sel" || tmux attach -t "$_sel"
+  case "$_key" in
+    ctrl-n)
+      # Use selected session's CWD as context; fall back to caller's $PWD
+      local _ctx_path="$PWD"
+      if [[ -n "$_sel" ]]; then
+        local _sel_path
+        _sel_path=$(tmux list-panes -a \
+          -F '#{session_name}|#{window_active}|#{pane_active}|#{pane_current_path}' \
+          2>/dev/null | awk -F'|' -v s="$_sel" '$1==s && $2=="1" && $3=="1" {print $4; exit}')
+        [[ -n "$_sel_path" ]] && _ctx_path="$_sel_path"
+      fi
+      local _default_n; _default_n=$(_ta_slug "$(basename "$_ctx_path")")
+      [[ -z "$_default_n" ]] && _default_n="session"
+      printf "新 session 名稱 [預設: %s]: " "$_default_n"
+      read -r _n; [[ -z "$_n" ]] && _n="$_default_n"; [[ -z "$_n" ]] && return
+      if tmux has-session -t "$_n" 2>/dev/null; then
+        printf "session '%s' 已存在，切換\n" "$_n"
+        [[ -n "$TMUX" ]] && tmux switch-client -t "$_n" || tmux attach -t "$_n"
+      else
+        [[ -n "$TMUX" ]] \
+          && tmux new-session -d -s "$_n" -c "$_ctx_path" && tmux switch-client -t "$_n" \
+          || tmux new-session -s "$_n" -c "$_ctx_path"
+      fi
+      ;;
+    ctrl-r)
+      [[ -z "$_sel" ]] && return
+      local _sp
+      _sp=$(tmux list-panes -a \
+        -F '#{session_name}|#{window_active}|#{pane_active}|#{pane_current_path}' \
+        2>/dev/null | awk -F'|' -v s="$_sel" '$1==s && $2=="1" && $3=="1" {print $4; exit}')
+      [[ -z "$_sp" ]] && _sp="$HOME"
+      local _hint; _hint=$(_ta_hint "$_sp")
+      printf "改名 '%s' → [預設: %s]: " "$_sel" "$_hint"
+      read -r _new; [[ -z "$_new" ]] && _new="$_hint"
+      if [[ -n "$_new" && "$_new" != "$_sel" ]]; then
+        if tmux has-session -t "$_new" 2>/dev/null; then
+          printf "名稱 '%s' 已存在，取消\n" "$_new"
+        else
+          tmux rename-session -t "$_sel" "$_new" && printf "→ '%s'\n" "$_new"
+        fi
+      fi
+      ta
+      ;;
+    *)
+      [[ -z "$_sel" ]] && return
+      [[ -n "$TMUX" ]] && tmux switch-client -t "$_sel" || tmux attach -t "$_sel"
+      ;;
+  esac
 }
 
 # ── tn: 快速新建命名 session（防重複，slug 化）──
@@ -338,12 +366,13 @@ tc() {
   [[ -z "$_sname" ]] && _sname="session"
   if tmux has-session -t "$_sname" 2>/dev/null; then
     printf "→ session '%s' 已存在，加開 claude window\n" "$_sname"
-    tmux new-window -t "$_sname" -n "claude" -c "$_dir" "claude -c"
+    # Use zsh -i so ~/.zshrc is sourced and the claude() wrapper (keychain guard) is active
+    tmux new-window -t "$_sname" -n "claude" -c "$_dir" "zsh -i -c 'claude -c'"
     [[ -n "$TMUX" ]] && tmux switch-client -t "$_sname" || tmux attach -t "$_sname"
     return
   fi
   tmux new-session -d -s "$_sname" -c "$_dir" -n "shell"
-  tmux new-window -t "$_sname" -n "claude" -c "$_dir" "claude -c"
+  tmux new-window -t "$_sname" -n "claude" -c "$_dir" "zsh -i -c 'claude -c'"
   tmux select-window -t "$_sname:1"
   printf "tc: '%s' 已建立（shell:0  claude:1）\n" "$_sname"
   [[ -n "$TMUX" ]] && tmux switch-client -t "$_sname" || tmux attach -t "$_sname"
@@ -404,7 +433,7 @@ tl() {
     fi
     local _dot _dc; [[ "$_att" != "0" ]] && { _dot="●"; _dc="$G"; } || { _dot="○"; _dc="$DIM"; }
     local _sc="$B"
-    if [[ "$_path" == *".claude/worktrees"* || "$_cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$_path" == *".claude/worktrees"* || "$_cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       _sc="${B}${BL}"
     elif [[ "$_cmd" == "codex" || "$_cmd" == "Codex" ]]; then
       _sc="${B}${MG}"
@@ -416,7 +445,3 @@ tl() {
     -F '#{session_name}|#{session_attached}|#{session_activity}|#{pane_current_command}|#{pane_current_path}' \
     2>/dev/null | awk -F'|' '!seen[$1]++')
 }
-
-[ -f ~/.fzf.zsh ] && source ~/.fzf.zsh
-
-# The next line updates PATH for the Google Cloud SDK.
