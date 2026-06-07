@@ -84,7 +84,7 @@ PYEOF_BATCH
     local _p="${_ppath[$_sess]:-$HOME}" _c="${_pcmd[$_sess]:-zsh}"
 
     # tool detection
-    local _tkey _icon _tcol
+    local _tkey="" _icon="" _tcol=""
     if [[ "$_p" == *".claude/worktrees"* || "$_c" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       _tkey=claude; _icon=""; _tcol="${B}${BL}"
     elif [[ "$_c" == "codex" || "$_c" == "Codex" || "$_p" == *"/.codex/worktrees"* ]]; then
@@ -107,7 +107,7 @@ PYEOF_BATCH
     fi
 
     # git project + branch
-    local _proj _br _gtop
+    local _proj="" _br="" _gtop=""
     if [[ -n "$_wt" ]]; then
       _gtop=$(git -C "$_proj_path" rev-parse --show-toplevel 2>/dev/null)
       if [[ -n "$_gtop" ]]; then
@@ -126,7 +126,7 @@ PYEOF_BATCH
     [[ -z "$_proj" ]] && _proj=$(basename "$_p")
 
     # time-ago
-    local _diff=$(( _now - _ts )) _ago
+    local _diff=$(( _now - _ts )) _ago=""
     if   (( _diff < 60    )); then _ago="${_diff}s"
     elif (( _diff < 3600  )); then _ago="$(( _diff / 60 ))m"
     elif (( _diff < 86400 )); then _ago="$(( _diff / 3600 ))h"
@@ -136,7 +136,7 @@ PYEOF_BATCH
     # Claude live status — O(1) lookup from pre-built map (no subprocess per session)
     local _st_icon=""
     if [[ "$_tkey" == "claude" ]]; then
-      local _st
+      local _st=""
       _st=$(printf '%s\n' "$_claude_status_map" \
         | awk -F'|' -v p="$_p" -v pp="$_proj_path" '$1==p || $1==pp {print $2; exit}')
       case "$_st" in
@@ -147,7 +147,7 @@ PYEOF_BATCH
     fi
 
     # attach dot
-    local _dot _dc
+    local _dot="" _dc=""
     [[ "$_att" != "0" ]] && { _dot="●"; _dc="$G"; } || { _dot="○"; _dc="$DIM"; }
 
     # session name colour by tool
@@ -425,13 +425,13 @@ tl() {
   local G=$'\033[32m' DIM=$'\033[90m' B=$'\033[1m' R=$'\033[0m' CY=$'\033[36m'
   local BL=$'\033[34m' MG=$'\033[35m'
   while IFS='|' read -r _s _att _ts _cmd _path; do
-    local _diff=$(( _now - _ts )) _ago
+    local _diff=$(( _now - _ts )) _ago=""
     if   (( _diff < 60    )); then _ago="${_diff}s"
     elif (( _diff < 3600  )); then _ago="$(( _diff / 60 ))m"
     elif (( _diff < 86400 )); then _ago="$(( _diff / 3600 ))h"
     else                           _ago="$(( _diff / 86400 ))d"
     fi
-    local _dot _dc; [[ "$_att" != "0" ]] && { _dot="●"; _dc="$G"; } || { _dot="○"; _dc="$DIM"; }
+    local _dot="" _dc=""; [[ "$_att" != "0" ]] && { _dot="●"; _dc="$G"; } || { _dot="○"; _dc="$DIM"; }
     local _sc="$B"
     if [[ "$_path" == *".claude/worktrees"* || "$_cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
       _sc="${B}${BL}"
