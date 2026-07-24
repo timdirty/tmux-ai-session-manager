@@ -1,0 +1,29 @@
+name: drive-dev CI
+
+on:
+  pull_request:
+    paths:
+      - 'drive-dev/**'
+      - '.github/workflows/drive-dev-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'drive-dev/**'
+      - '.github/workflows/drive-dev-ci.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: drive-dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: drive-dev/package.json
+      - run: npm install
+      - run: npm run check
+      - run: docker build -t drive-dev:test .

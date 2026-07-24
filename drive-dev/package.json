@@ -1,0 +1,28 @@
+{
+  "name": "drive-dev-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A session-isolated MCP harness for operating remote development workspaces.",
+  "bin": { "drive-dev": "dist/src/index.js" },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "node --test --import tsx test/*.test.ts",
+    "check": "npm run build && npm test"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.1.0",
+    "fast-glob": "^3.3.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
